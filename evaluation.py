@@ -104,7 +104,7 @@ def compute_loglik_from_kf_terms(innovations: np.ndarray, S_list: np.ndarray):
     logger.info(f"Final computed log-likelihood: {logL:.4f}")
     return logL
 
-def evaluate_kalman_pipeline(Y, X_filt, X_pca, B, innovations, S_list, P_all):
+def evaluate_kalman_pipeline(Y, X_filt, X_pca, B, A, innovations, S_list, P_all):
     """
     Evaluate Kalman Filter performance:
     1. State estimate consistency
@@ -133,7 +133,8 @@ def evaluate_kalman_pipeline(Y, X_filt, X_pca, B, innovations, S_list, P_all):
     
     # Step 4: t+1 prediction evaluation
     logger.info("Step 4: Evaluating one-step-ahead prediction...")
-    evaluate_observation_fit(Y[1:], X_filt[:-1], B, label="t+1 prediction")
+    X_pred_tplus1 = (A @ X_filt[:-1].T).T   # (T-1, k)
+    evaluate_observation_fit(Y[1:], X_pred_tplus1, B, label="t+1 prediction")
 
     # 5. Log-likelihood evaluation
     logger.info("Step 5: Computing log-likelihood...")

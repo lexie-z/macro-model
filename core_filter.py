@@ -2,6 +2,7 @@ import numpy as np
 import pandas as pd
 from config import logger
 np.set_printoptions(precision=4, suppress=True, linewidth=120)
+
 def kalman_filter(Y: np.ndarray, A: np.ndarray, B: np.ndarray, G: np.ndarray, H: np.ndarray, X0: np.ndarray, P0: np.ndarray):
     """
     Run Kalman Filter for the linear Gaussian state-space model.

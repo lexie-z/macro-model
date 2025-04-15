@@ -5,6 +5,7 @@ from sklearn.decomposition import PCA
 from config import logger
 plt.rcParams['figure.figsize'] = (6, 3)
 np.set_printoptions(precision=4, suppress=True, linewidth=120)
+
 def scree_plot(df:pd.DataFrame):
     pca = PCA()
     X_pca = pca.fit_transform(df)

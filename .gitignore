@@ -1,0 +1,29 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*.so
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# Jupyter notebook checkpoints
+.ipynb_checkpoints/
+
+# Log files
+*.log
+
+# OS files
+.DS_Store
+
+# Reports or generated PDFs
+*.pdf
+
+# Compiled Python files in root
+*.cpython-*
+
+# Model checkpoints or results
+*.ckpt
+*.pth
+*.pt

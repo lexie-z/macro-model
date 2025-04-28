@@ -102,7 +102,7 @@ def clip_by_MAD(series: pd.Series, clip_n: float) -> pd.Series:
     else:
         return _series
 
-def initialize_by_window(df: pd.DataFrame, clipping_factors: list = ['UNRATE'], plot: bool=False, window_size: int = 48, clip_n: float = 3.0):
+def initialize_by_window(df: pd.DataFrame, clipping_factors, plot: bool=False, window_size: int = 48, clip_n: float = 3.0):
     _df = df.iloc[:window_size].copy(deep=True)
 
     for col in clipping_factors:

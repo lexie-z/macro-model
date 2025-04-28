@@ -21,42 +21,26 @@ def regularize_covariance_ridge(M: np.ndarray, epsilon=1e-2):
     logger.info(f"Applying ridge regularization to covariance matrix with ε = {epsilon}.")
     return M + epsilon * np.eye(M.shape[0])
 
-def fit_state_space_model(X_pca: pd.DataFrame, p=1):
+def fit_transition_model(X_pca: pd.DataFrame, p=1):
     """
-    Fit VAR(p) on latent states to initialize A and Q.
+    Fit VAR(p) on latent states to initialize A and collect residuals (epsilon).
     """
     logger.info(f"Fitting VAR({p}) model to latent state series with shape {X_pca.shape}.")
     model = VAR(X_pca)
     results = model.fit(p)
 
-    A = results.coefs[0] # (k x k)                
-    residuals = results.resid.values # (T-p x k)
-    Q = np.cov(residuals.T) # (k x k)           
+    A = results.coefs[0]  # (k x k)
+    residuals_eps = results.resid  # (T-p x k)
 
     # Stabilize A
     logger.info("VAR coefficients extracted. Projecting A to ensure stability.")
     A = spectral_radius_projection(A)
 
-    # Check PD of Q and fix if needed
-    try:
-        G = cholesky(Q, lower=True)
-        logger.info("Covariance matrix Q is positive definite. Cholesky decomposition successful.")
-    except LinAlgError:
-        logger.warning("Covariance matrix Q is not positive definite. Applying ridge regularization.")
-        Q = regularize_covariance_ridge(Q)
-        G = cholesky(Q, lower=True)
-        logger.info("Cholesky decomposition after regularization successful.")
-        
-        # SVD check for residuals
-        _, s_residual, _ = np.linalg.svd(residuals, full_matrices=False)
-        logger.info(f"Singular values of residuals: {np.round(s_residual, 4)}")
-
-    return A, G, residuals
+    return A, residuals_eps
 
 def fit_observation_model(Y: pd.DataFrame, X: pd.DataFrame):
     """
-    Fit observation model: Y_t = B X_t + H η_t
-    where H is the Cholesky factor of residual covariance matrix R.
+    Fit OLS observation model: Y_t = B X_t + H η_t (where H will later be constructed).
     """
     logger.info(f"Fitting OLS observation model with Y shape {Y.shape}, X shape {X.shape}.")
 
@@ -68,18 +52,39 @@ def fit_observation_model(Y: pd.DataFrame, X: pd.DataFrame):
     B = solve(R_qr, Q.T @ Y_vals).T  # (n x k)
 
     Y_pred = X_vals @ B.T  # (T x n)
-    residuals = Y_vals - Y_pred  # (T x n)
-    R = np.cov(residuals.T)  # (n x n)
+    residuals_eta = Y_vals - Y_pred  # (T x n)
+
+    return B, residuals_eta
+
+
+def compute_stacked_noise_params(residuals_eps: pd.DataFrame, residuals_eta: pd.DataFrame, ridge_epsilon=1e-2):
+    """
+    Stack epsilon and eta residuals into xi, compute full covariance matrix of xi, apply Cholesky regularization if needed,
+    and construct G_bar and H_bar.
+    """
+    logger.info("Stacking epsilon and eta residuals for full noise covariance estimation.")
+
+    # Align residuals: use eps as is, drop first row of eta
+    xi = np.hstack([residuals_eps, residuals_eta[1:]])  # (T-1, k+n)
+
+    cov_xi = np.cov(xi.T)
 
     try:
-        H = cholesky(R, lower=True)
-        logger.info("Covariance matrix R is positive definite. Cholesky decomposition successful.")
+        L = cholesky(cov_xi, lower=True)
+        logger.info("Full stacked covariance matrix is positive definite. Cholesky decomposition successful.")
     except LinAlgError:
-        logger.warning("Covariance matrix R is not positive definite. Applying ridge regularization.")
-        _, s_residual, _ = np.linalg.svd(residuals, full_matrices=False)
-        logger.info(f"Singular values of residuals: {np.round(s_residual, 4)}")
-        R = regularize_covariance_ridge(R)
-        H = cholesky(R, lower=True)
+        logger.warning("Full stacked covariance matrix is not positive definite. Applying ridge regularization.")
+        cov_xi = regularize_covariance_ridge(cov_xi, epsilon=ridge_epsilon)
+        L = cholesky(cov_xi, lower=True)
         logger.info("Cholesky decomposition after regularization successful.")
 
-    return B, H, residuals
+    k = residuals_eps.shape[1]
+    n = residuals_eta.shape[1]
+
+    # Create padded matrices and apply whitening
+    G_pad = np.hstack([np.eye(k), np.zeros((k, n))])
+    H_pad = np.hstack([np.zeros((n, k)), np.eye(n)])
+    G_bar = G_pad @ L
+    H_bar = H_pad @ L
+
+    return G_bar, H_bar, xi, L

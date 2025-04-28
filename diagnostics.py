@@ -104,63 +104,38 @@ def compute_residual_mean(residuals: np.ndarray, name: str = "Residuals", tolera
     return True
 
 def run_kalman_initialization_checks(
-    epsilon: np.ndarray,
-    eta: np.ndarray,
-    X: np.ndarray,
-    G: np.ndarray,
-    H: np.ndarray,
-    tolerance: float = 0.1,
-    lags: int = 12,
-    p: int = 1
+    xi: np.ndarray,
+    L: np.ndarray,
+    lags: int = 12
 ) -> dict:
     """
-    Run Kalman Filter initialization sanity checks:
-    1. Cross-covariance checks
-    2. Rank diagnostics
-    3. Residual whiteness and zero-mean checks
-    4. Visual diagnostics of residuals
+    Run sanity checks on stacked noise xi and its Cholesky factor L:
+    1. Residual whiteness check
+    2. Residual zero-mean check
+    3. Cholesky conditioning diagnostics
+    4. Residual plots
     """
-    logger.info("=== Kalman Initialization Sanity Checks ===")
+    logger.info("=== Stacked Kalman Initialization Sanity Checks ===")
 
     results = {}
 
-    # 1. Cov(epsilon, eta)
-    logger.info("Step 1: Checking cross-covariance between epsilon and eta...")
-    results['cross_eps_eta'] = compute_cross_covariance(
-        epsilon, eta[p:], "epsilon", "eta", tolerance
-    )
+    # 1. Residual whiteness: xi
+    logger.info("Step 1: Checking whiteness of stacked residuals (xi)...")
+    results['white_xi'] = compute_residuals_correlation(xi, "xi", lags)
 
-    # 2. Cov(X, eta)
-    logger.info("Step 2: Checking cross-covariance between X and eta...")
-    results['cross_X_eta'] = compute_cross_covariance(
-        X, eta, "X", "eta", tolerance
-    )
+    # 2. Residual zero-mean check: xi
+    logger.info("Step 2: Checking zero-mean of stacked residuals (xi)...")
+    results['zero_mean_xi'] = compute_residual_mean(xi, "xi")
 
-    # 3. Residual whiteness: epsilon
-    logger.info("Step 3: Checking whiteness of epsilon (state residuals)...")
-    results['white_eps'] = compute_residuals_correlation(epsilon, "epsilon", lags)
+    # 3. Diagnostics of Cholesky factor L
+    logger.info("Step 3: Computing diagnostics of stacked Cholesky factor L...")
+    compute_covariance_diagnostics(L, 'L')
 
-    # 4. Residual whiteness: eta
-    logger.info("Step 4: Checking whiteness of eta (observation residuals)...")
-    results['white_eta'] = compute_residuals_correlation(eta, "eta", lags)
-    
-    # 5. Diagnostics of HH'
-    logger.info("Step 5: Computing diagnostics of observation covariance HH'...")
-    compute_covariance_diagnostics(H, 'H')
-    
-    # 6. Diagnostics of GG'
-    logger.info("Step 5: Computing diagnostics of process covariance GG'...")
-    compute_covariance_diagnostics(G, 'G')
+    # 4. Residual plots
+    logger.info("Step 4: Plotting stacked residual diagnostics (xi)...")
+    residual_plot(xi, "xi", window=lags)
 
-    # 7. Residual plots
-    logger.info("Step 6: Plotting residual diagnostics for epsilon and eta...")
-    residual_plot(epsilon, "epsilon", window=lags)
-    residual_plot(eta, "eta", window=lags)
-
-    # 8. Zero-mean check (handled by covariance centering)
-    logger.info("Step 7 skipped: Mean-centering is implicitly handled in covariance computation.")
-
-    logger.info("Sanity checks completed.")
+    logger.info("Stacked sanity checks completed.")
     logger.info(f"Summary of checks:\n{results}")
 
     return results

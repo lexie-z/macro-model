@@ -1,91 +1,114 @@
-import numpy as np
-import pandas as pd
-from config import logger
-np.set_printoptions(precision=4, suppress=True, linewidth=120)
+import jax.numpy as jnp
+import jax
+from jax import jit
+import logging
+from functools import partial
 
-def kalman_filter(Y: np.ndarray, A: np.ndarray, B: np.ndarray, G: np.ndarray, H: np.ndarray, X0: np.ndarray, P0: np.ndarray):
-    """
-    Run Kalman Filter for the linear Gaussian state-space model.
-    """
-    T, k = Y.shape[0], A.shape[0]
-    
-    logger.info(f"Running Kalman filter for {T} time steps.")
+logger = logging.getLogger(__name__)
 
-    # recover covariance matrix
-    Q = G @ G.T  # process noise covariance
-    R = H @ H.T  # observation noise covariance
-    
-    X_filt = np.zeros((T, k))  
-    P = P0.copy()              
-    x = X0.copy()              
+class KalmanFilter:
+    def __init__(self, A: jnp.ndarray, B: jnp.ndarray, G: jnp.ndarray, H: jnp.ndarray, 
+                 X0: jnp.ndarray = None, P0: jnp.ndarray = None, certainty_factor: float = 1.0):
+        """
+        Initialize Kalman Filter.
+        Args:
+            A (jnp.ndarray): State transition matrix.
+            B (jnp.ndarray): Observation matrix.
+            G (jnp.ndarray): Process noise input matrix.
+            H (jnp.ndarray): Measurement noise input matrix.
+            X0 (jnp.ndarray, optional): Initial latent state. Defaults to zeros.
+            P0 (jnp.ndarray, optional): Initial state covariance. Defaults to scaled identity.
+            certainty_factor (float, optional): Scaling for initial P0. Defaults to 1.0.
+        """
+        self.A = A
+        self.B = B
+        self.G = G
+        self.H = H
 
-    P_all = []                # store posterior covariances
-    innovations = []          # store innovations 
-    S_list = []               # store innovation covariances
+        self.k = A.shape[0]
 
-    for t in range(T):
-        # prediction phase
-        x_pred = A @ x                      # priori state estimate
-        P_pred = A @ P @ A.T + Q           # priori state covariance
+        if X0 is None:
+            self.X0 = jnp.zeros(self.k)
+        else:
+            self.X0 = X0
 
-        # update phase 
-        y_pred = B @ x_pred                
-        innovation = Y[t] - y_pred         
-        S = B @ P_pred @ B.T + R           # innovation covariance
-        
-        try:
-            K = P_pred @ B.T @ np.linalg.inv(S)
-        except np.linalg.LinAlgError:
-            logger.error(f"Numerical instability at t={t}: innovation covariance not invertible.")
-            raise
-        
-        if t < 5:
-            logger.info(f"Kalman gain K[{t}]:\n{K}") # log kalman gain from first 5 time steps
+        if P0 is None:
+            self.P0 = jnp.eye(self.k) * certainty_factor
+        else:
+            self.P0 = P0
 
-        x = x_pred + K @ innovation
-        P = P_pred - K @ B @ P_pred
+    @partial(jax.jit, static_argnums=0)
+    def run_filter(self, Y: jnp.ndarray):
+        """
+        Run standard Kalman filter.
+        Args:
+            Y (jnp.ndarray): Observation matrix (T x n)
 
-        # store results
-        X_filt[t] = x
-        P_all.append(P.copy())
-        innovations.append(innovation)
-        S_list.append(S)
+        Returns:
+            X_filt (jnp.ndarray): Filtered latent states (T x k)
+            P_all (jnp.ndarray): Posterior covariances (T x k x k)
+            innovations (jnp.ndarray): Innovations (T x n)
+            S_list (jnp.ndarray): Innovation covariances (T x n x n)
+        """
+        T, n = Y.shape
 
-        logger.debug(f"t={t}: |innovation|={np.linalg.norm(innovation):.4f}, Kalman gain norm={np.linalg.norm(K):.4f}")
+        # recover covariance matrix
+        Q = self.G @ self.G.T # process noise covariance
+        R = self.H @ self.H.T # observation noise covariance
 
-    logger.info("Kalman filter run completed.")
-    return X_filt, P_all, innovations, S_list
+        def step(carry, yt):
+            x, P = carry
+            # prediction phase
+            x_pred = self.A @ x  # priori state estimate
+            P_pred = self.A @ P @ self.A.T + Q  # priori state covariance
 
-def run_kalman_filter(Y: np.ndarray, A: np.ndarray, B: np.ndarray, G: np.ndarray, H: np.ndarray, use_pca_init: bool=False, X_pca=None, certainty_factor: float=1):
-    """
-    Main function to run Kalman Filter with default or PCA-based initialization.
-    """
-    k = A.shape[0]  
-    logger.info("Starting Kalman Filter execution...")
-    logger.info(f"State dimension k={k}, certainty factor for P0={certainty_factor}")
+            # update phase 
+            y_pred = self.B @ x_pred
+            innovation = yt - y_pred
+            S = self.B @ P_pred @ self.B.T + R # innovation covariance
+            K = jnp.linalg.solve(S, (P_pred @ self.B.T).T).T
 
-    # Initialize state
-    if use_pca_init:
-        if X_pca is None:
-            raise ValueError("X_pca must be provided if use_pca_init=True")
-        X0 = X_pca.iloc[0].values
-        logger.info("Initializing latent state from first PCA value.")
-    else:
-        X0 = np.zeros(k)
-        logger.info("Initializing latent state as zero vector.")
+            x_new = x_pred + K @ innovation
+            P_new = P_pred - K @ self.B @ P_pred
 
-    P0 = np.eye(k) * certainty_factor
-    
-    # Run Kalman Filter
-    X_filt, P_all, innovations, S_list = kalman_filter(
-        Y=Y,
-        A=A,
-        B=B,
-        G=G,
-        H=H,
-        X0=X0,
-        P0=P0
-    )
+            return (x_new, P_new), (x_new, P_new, innovation, S)
 
-    logger.info("Kalman Filter execution completed.")
-    return X_filt, P_all, innovations, S_list
+        (xf, pf), (X_filt, P_all, innovations, S_list) = jax.lax.scan(
+            step, (self.X0, self.P0), Y
+        )
+
+        return X_filt, P_all, innovations, S_list
+
+    def forecast_one_step(self, X_filt: jnp.ndarray):
+        """
+        One-step-ahead forecast: \hat{Y}_{t+1|t} = B A X_t
+        Args:
+            X_filt (jnp.ndarray): Filtered latent states (T x k)
+
+        Returns:
+            Y_pred_tplus1 (jnp.ndarray): One-step ahead forecast (T-1 x n)
+        """
+        X_pred_tplus1 = (self.A @ X_filt[:-1].T).T
+        Y_pred_tplus1 = (self.B @ X_pred_tplus1.T).T
+        return Y_pred_tplus1
+
+    def evaluate_forecast(self, Y: jnp.ndarray):
+        """
+        Full evaluation pipeline: run filter, forecast, compute RMSE loss.
+        Args:
+            Y (jnp.ndarray): Observation matrix (T x n)
+
+        Returns:
+            rmse (float): Root Mean Squared Error of one-step-ahead forecast.
+        """
+        logger.info("Evaluating Kalman filter forecasting performance...")
+
+        X_filt, _, _, _ = self.run_filter(Y)
+        Y_forecast = self.forecast_one_step(X_filt)
+        Y_true = Y[1:]
+
+        mse = jnp.mean((Y_true - Y_forecast) ** 2)
+
+        logger.info(f"Forecast MSE (training loss): {mse:.6f}")
+
+        return mse

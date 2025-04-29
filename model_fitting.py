@@ -1,14 +1,15 @@
-import numpy as np
-import pandas as pd
-from numpy.linalg import eigvals, qr, solve
+import jax.numpy as jnp
+from jax.numpy.linalg import eigvals, qr, solve
 from scipy.linalg import cholesky, LinAlgError
 from config import logger
-np.set_printoptions(precision=4, suppress=True, linewidth=120)
+import pandas as pd
 from statsmodels.tsa.api import VAR
 
-def spectral_radius_projection(A: np.ndarray, target_radius: float = 0.98):
+jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
+
+def spectral_radius_projection(A: jnp.ndarray, target_radius: float = 0.98):
     eigs = eigvals(A)
-    current_radius = np.max(np.abs(eigs))
+    current_radius = jnp.max(jnp.abs(eigs))
     if current_radius >= 1:
         A = (target_radius / current_radius) * A
         logger.warning(f"Projected A to spectral radius {target_radius:.2f} to ensure stability.")
@@ -17,9 +18,9 @@ def spectral_radius_projection(A: np.ndarray, target_radius: float = 0.98):
 
     return A
 
-def regularize_covariance_ridge(M: np.ndarray, epsilon=1e-2):
+def regularize_covariance_ridge(M: jnp.ndarray, epsilon=1e-2):
     logger.info(f"Applying ridge regularization to covariance matrix with ε = {epsilon}.")
-    return M + epsilon * np.eye(M.shape[0])
+    return M + epsilon * jnp.eye(M.shape[0])
 
 def fit_transition_model(X_pca: pd.DataFrame, p=1):
     """
@@ -29,8 +30,8 @@ def fit_transition_model(X_pca: pd.DataFrame, p=1):
     model = VAR(X_pca)
     results = model.fit(p)
 
-    A = results.coefs[0]  # (k x k)
-    residuals_eps = results.resid  # (T-p x k)
+    A = jnp.array(results.coefs[0])
+    residuals_eps = jnp.array(results.resid)
 
     # Stabilize A
     logger.info("VAR coefficients extracted. Projecting A to ensure stability.")
@@ -44,20 +45,19 @@ def fit_observation_model(Y: pd.DataFrame, X: pd.DataFrame):
     """
     logger.info(f"Fitting OLS observation model with Y shape {Y.shape}, X shape {X.shape}.")
 
-    Y_vals = Y.values  # (T x n)
-    X_vals = X.values  # (T x k)
+    Y_vals = jnp.array(Y)
+    X_vals = jnp.array(X)
 
     # QR decomposition for stable least squares
     Q, R_qr = qr(X_vals)
-    B = solve(R_qr, Q.T @ Y_vals).T  # (n x k)
+    B = solve(R_qr, Q.T @ Y_vals).T
 
-    Y_pred = X_vals @ B.T  # (T x n)
-    residuals_eta = Y_vals - Y_pred  # (T x n)
+    Y_pred = X_vals @ B.T
+    residuals_eta = Y_vals - Y_pred
 
     return B, residuals_eta
 
-
-def compute_stacked_noise_params(residuals_eps: pd.DataFrame, residuals_eta: pd.DataFrame, ridge_epsilon=1e-2):
+def compute_stacked_noise_params(residuals_eps: jnp.ndarray, residuals_eta: jnp.ndarray, ridge_epsilon=1e-2):
     """
     Stack epsilon and eta residuals into xi, compute full covariance matrix of xi, apply Cholesky regularization if needed,
     and construct G_bar and H_bar.
@@ -65,9 +65,8 @@ def compute_stacked_noise_params(residuals_eps: pd.DataFrame, residuals_eta: pd.
     logger.info("Stacking epsilon and eta residuals for full noise covariance estimation.")
 
     # Align residuals: use eps as is, drop first row of eta
-    xi = np.hstack([residuals_eps, residuals_eta[1:]])  # (T-1, k+n)
-
-    cov_xi = np.cov(xi.T)
+    xi = jnp.hstack([residuals_eps, residuals_eta[1:]]) # (T-1, k+n)
+    cov_xi = jnp.cov(xi.T)
 
     try:
         L = cholesky(cov_xi, lower=True)
@@ -81,9 +80,9 @@ def compute_stacked_noise_params(residuals_eps: pd.DataFrame, residuals_eta: pd.
     k = residuals_eps.shape[1]
     n = residuals_eta.shape[1]
 
-    # Create padded matrices and apply whitening
-    G_pad = np.hstack([np.eye(k), np.zeros((k, n))])
-    H_pad = np.hstack([np.zeros((n, k)), np.eye(n)])
+    G_pad = jnp.hstack([jnp.eye(k), jnp.zeros((k, n))])
+    H_pad = jnp.hstack([jnp.zeros((n, k)), jnp.eye(n)])
+
     G_bar = G_pad @ L
     H_bar = H_pad @ L
 

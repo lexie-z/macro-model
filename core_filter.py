@@ -1,14 +1,20 @@
 import jax.numpy as jnp
 import jax
-from jax import jit
 import logging
 from functools import partial
+from dataclasses import dataclass
+from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
 
+@dataclass
+class KalmanFilterConfig:
+    certainty_factor: float = 1.0  
+    use_pca_init: bool = False     
+    log_first_steps: int = 5       # how many first steps to log Kalman gain
+    
 class KalmanFilter:
-    def __init__(self, A: jnp.ndarray, B: jnp.ndarray, G: jnp.ndarray, H: jnp.ndarray, 
-                 X0: jnp.ndarray = None, P0: jnp.ndarray = None, certainty_factor: float = 1.0):
+    def __init__(self, A: jnp.ndarray, B: jnp.ndarray, G: jnp.ndarray, H: jnp.ndarray, config: Optional[KalmanFilterConfig] = None):
         """
         Initialize Kalman Filter.
         Args:
@@ -16,53 +22,38 @@ class KalmanFilter:
             B (jnp.ndarray): Observation matrix.
             G (jnp.ndarray): Process noise input matrix.
             H (jnp.ndarray): Measurement noise input matrix.
-            X0 (jnp.ndarray, optional): Initial latent state. Defaults to zeros.
-            P0 (jnp.ndarray, optional): Initial state covariance. Defaults to scaled identity.
-            certainty_factor (float, optional): Scaling for initial P0. Defaults to 1.0.
+            config (KalmanFilterConfig, optional): Initial configuration.
         """
         self.A = A
         self.B = B
         self.G = G
         self.H = H
-
+        self.config = config if config else KalmanFilterConfig()
         self.k = A.shape[0]
-
-        if X0 is None:
-            self.X0 = jnp.zeros(self.k)
-        else:
-            self.X0 = X0
-
-        if P0 is None:
-            self.P0 = jnp.eye(self.k) * certainty_factor
-        else:
-            self.P0 = P0
+        
+        # State tracking
+        self.X_filt: Optional[jnp.ndarray] = None
+        self.P_all: Optional[Any] = None
+        self.innovations: Optional[Any] = None
+        self.S_list: Optional[Any] = None
+        self.log_likelihood: Optional[float] = None
 
     @partial(jax.jit, static_argnums=0)
-    def run_filter(self, Y: jnp.ndarray):
+    def _filter_core(self, Y, X0, P0):
         """
-        Run standard Kalman filter.
-        Args:
-            Y (jnp.ndarray): Observation matrix (T x n)
-
-        Returns:
-            X_filt (jnp.ndarray): Filtered latent states (T x k)
-            P_all (jnp.ndarray): Posterior covariances (T x k x k)
-            innovations (jnp.ndarray): Innovations (T x n)
-            S_list (jnp.ndarray): Innovation covariances (T x n x n)
+        Construct standard kalman filter
         """
-        T, n = Y.shape
-
         # recover covariance matrix
-        Q = self.G @ self.G.T # process noise covariance
-        R = self.H @ self.H.T # observation noise covariance
+        Q = self.G @ self.G.T
+        R = self.H @ self.H.T
 
         def step(carry, yt):
             x, P = carry
-            # prediction phase
+            # Prediction phase
             x_pred = self.A @ x  # priori state estimate
             P_pred = self.A @ P @ self.A.T + Q  # priori state covariance
 
-            # update phase 
+            # Update phase
             y_pred = self.B @ x_pred
             innovation = yt - y_pred
             S = self.B @ P_pred @ self.B.T + R # innovation covariance
@@ -73,42 +64,45 @@ class KalmanFilter:
 
             return (x_new, P_new), (x_new, P_new, innovation, S)
 
-        (xf, pf), (X_filt, P_all, innovations, S_list) = jax.lax.scan(
-            step, (self.X0, self.P0), Y
+        (_, _), (X_filt, P_all, innovations, S_list) = jax.lax.scan(
+            step,
+            (X0, P0),
+            Y
         )
 
         return X_filt, P_all, innovations, S_list
 
-    def forecast_one_step(self, X_filt: jnp.ndarray):
+    def run_filter(self, Y: jnp.ndarray, X_pca: Optional[jnp.ndarray] = None):
         """
-        One-step-ahead forecast: \hat{Y}_{t+1|t} = B A X_t
-        Args:
-            X_filt (jnp.ndarray): Filtered latent states (T x k)
-
-        Returns:
-            Y_pred_tplus1 (jnp.ndarray): One-step ahead forecast (T-1 x n)
+        main execution function for kalman filter
         """
-        X_pred_tplus1 = (self.A @ X_filt[:-1].T).T
-        Y_pred_tplus1 = (self.B @ X_pred_tplus1.T).T
-        return Y_pred_tplus1
+        k = self.A.shape[0]
 
-    def evaluate_forecast(self, Y: jnp.ndarray):
-        """
-        Full evaluation pipeline: run filter, forecast, compute RMSE loss.
-        Args:
-            Y (jnp.ndarray): Observation matrix (T x n)
+        if self.config.use_pca_init:
+            if X_pca is None:
+                raise ValueError("PCA initialization requested but no X_pca provided.")
+            X0 = jnp.array(X_pca[0])
+        else:
+            X0 = jnp.zeros(k)
 
-        Returns:
-            rmse (float): Root Mean Squared Error of one-step-ahead forecast.
-        """
-        logger.info("Evaluating Kalman filter forecasting performance...")
+        P0 = jnp.eye(k) * self.config.certainty_factor
 
-        X_filt, _, _, _ = self.run_filter(Y)
-        Y_forecast = self.forecast_one_step(X_filt)
-        Y_true = Y[1:]
+        self.X_filt, self.P_all, self.innovations, self.S_list = self._filter_core(Y, X0, P0)
+        return
 
-        mse = jnp.mean((Y_true - Y_forecast) ** 2)
+    @partial(jax.jit, static_argnums=0)
+    def predict_one_step(self, X_t):
+        return self.B @ self.A @ X_t
 
-        logger.info(f"Forecast MSE (training loss): {mse:.6f}")
+    @partial(jax.jit, static_argnums=0)
+    def compute_loss(self, Y_target: jnp.ndarray, X_pca: Optional[jnp.ndarray] = None):
+        # Run filter if needed
+        if self.X_filt is None:
+            self.run_filter(Y_target, X_pca)
 
-        return mse
+        # One-step ahead prediction
+        Y_pred_tplus1 = (self.B @ (self.A @ self.X_filt[:-1].T)).T
+        Y_true_tplus1 = Y_target[1:]
+
+        loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
+        return loss

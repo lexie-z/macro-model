@@ -1,22 +1,20 @@
+import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 from config import logger
 import statsmodels.api as sm
 import matplotlib.pyplot as plt
+
 plt.rcParams['figure.figsize'] = (6, 3)
-np.set_printoptions(precision=4, suppress=True, linewidth=120)
+jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
 
-def compute_cross_covariance(X1: np.ndarray, X2: np.ndarray, name1: str, name2: str, tolerance: float = 0.1) -> bool:
-    """
-    Compute cross covariance and flag error if covariance exceeds tol.
-    """
-    # Compute covariance: E[(X1 - E(X1))(X2 - E(X2))^T]
-    X1_centered = X1 - X1.mean(axis=0)
-    X2_centered = X2 - X2.mean(axis=0)
+def compute_cross_covariance(X1: jnp.ndarray, X2: jnp.ndarray, name1: str, name2: str, tolerance: float = 0.1) -> bool:
+    X1_centered = X1 - jnp.mean(X1, axis=0)
+    X2_centered = X2 - jnp.mean(X2, axis=0)
     cross_cov = X1_centered.T @ X2_centered / (X1.shape[0] - 1)
-    max_abs_val = np.max(np.abs(cross_cov))
+    max_abs_val = jnp.max(jnp.abs(cross_cov))
 
-    logger.info(f"Empirical Covariance between {name1} and {name2}:\n{cross_cov}")
+    logger.info(f"Empirical Covariance between {name1} and {name2}:{cross_cov}")
 
     if max_abs_val > tolerance:
         logger.warning(
@@ -43,19 +41,16 @@ def compute_residuals_correlation(residuals: np.ndarray, name: str = "Residuals"
             all_passed = False
     return all_passed
 
-def compute_covariance_diagnostics(matrix: np.ndarray, name: str, tol: float = 1e-8):
-    """
-    Compute diagnostics of covariance matrix.
-    """
+def compute_covariance_diagnostics(matrix: jnp.ndarray, name: str, tol: float = 1e-8):
     cov = matrix @ matrix.T
-    eigvals = np.linalg.eigvalsh(cov)
-    diag = np.diag(cov)
-    cond = np.linalg.cond(matrix)
-    rank = np.sum(eigvals > tol)
+    eigvals = jnp.linalg.eigvalsh(cov)
+    diag = jnp.diag(cov)
+    cond = jnp.linalg.cond(matrix)
+    rank = jnp.sum(eigvals > tol)
 
     logger.info(f"Covariance Diagnostics for {name} {name}^T")
-    logger.info(f"{name} {name}^T diag: {np.round(diag, 4)}")
-    logger.info(f"{name} {name}^T eigenvalues: {np.round(eigvals, 6)}")
+    logger.info(f"{name} {name}^T diag: {jnp.round(diag, 4)}")
+    logger.info(f"{name} {name}^T eigenvalues: {jnp.round(eigvals, 6)}")
     logger.info(f"{name} condition number: {cond:.4f}")
     logger.info(f"{name} {name}^T numerical rank: {rank} / {cov.shape[0]}")
 
@@ -74,7 +69,7 @@ def residual_plot(residuals: np.ndarray, name: str = "Residuals", window: int=12
         rolling_var = series.rolling(window).var()
 
         fig, axs = plt.subplots(2, 1, sharex=True)
-        
+
         axs[0].plot(series, label=f'{name}[{i}]')
         axs[0].set_title(f'{name}[{i}] — Level')
         axs[0].grid(True)
@@ -89,12 +84,9 @@ def residual_plot(residuals: np.ndarray, name: str = "Residuals", window: int=12
         plt.show()
     return
 
-def compute_residual_mean(residuals: np.ndarray, name: str = "Residuals", tolerance: float = 1e-3) -> bool:
-    """
-    Compute residuals mean and flag errors if any dimension is considered non-zero given the tolerance.
-    """
-    mean_vec = residuals.mean(axis=0)
-    max_abs_mean = np.max(np.abs(mean_vec))
+def compute_residual_mean(residuals: jnp.ndarray, name: str = "Residuals", tolerance: float = 1e-3) -> bool:
+    mean_vec = jnp.mean(residuals, axis=0)
+    max_abs_mean = jnp.max(jnp.abs(mean_vec))
 
     if max_abs_mean > tolerance:
         logger.warning(f"{name} mean not zero within tolerance {tolerance}: {mean_vec}")
@@ -104,8 +96,8 @@ def compute_residual_mean(residuals: np.ndarray, name: str = "Residuals", tolera
     return True
 
 def run_kalman_initialization_checks(
-    xi: np.ndarray,
-    L: np.ndarray,
+    xi: jnp.ndarray,
+    L: jnp.ndarray,
     lags: int = 12
 ) -> dict:
     """
@@ -121,7 +113,7 @@ def run_kalman_initialization_checks(
 
     # 1. Residual whiteness: xi
     logger.info("Step 1: Checking whiteness of stacked residuals (xi)...")
-    results['white_xi'] = compute_residuals_correlation(xi, "xi", lags)
+    results['white_xi'] = compute_residuals_correlation(np.asarray(xi), "xi", lags)
 
     # 2. Residual zero-mean check: xi
     logger.info("Step 2: Checking zero-mean of stacked residuals (xi)...")
@@ -133,7 +125,7 @@ def run_kalman_initialization_checks(
 
     # 4. Residual plots
     logger.info("Step 4: Plotting stacked residual diagnostics (xi)...")
-    residual_plot(xi, "xi", window=lags)
+    residual_plot(np.asarray(xi), "xi", window=lags)
 
     logger.info("Stacked sanity checks completed.")
     logger.info(f"Summary of checks:\n{results}")

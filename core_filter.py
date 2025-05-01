@@ -4,6 +4,7 @@ import logging
 from functools import partial
 from dataclasses import dataclass
 from typing import Optional, Any
+import jax.lax as lax
 jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
 logger = logging.getLogger(__name__)
 
@@ -12,6 +13,10 @@ class KalmanFilterConfig:
     certainty_factor: float = 1.0  
     use_pca_init: bool = False     
     log_first_steps: int = 5       # how many first steps to log Kalman gain
+    lambda_A: float = 1e-2
+    lambda_G: float = 1e-3
+    lambda_H: float = 1e-3
+    cond_eps: float = 1e-12
     
 class KalmanFilter:
     def __init__(self, A: jnp.ndarray, B: jnp.ndarray, G: jnp.ndarray, H: jnp.ndarray, config: Optional[KalmanFilterConfig] = None):
@@ -37,6 +42,19 @@ class KalmanFilter:
         self.innovations: Optional[Any] = None
         self.S_list: Optional[Any] = None
         self.log_likelihood: Optional[float] = None
+    
+    @staticmethod
+    def regularize_if_ill_conditioned(S: jnp.ndarray, threshold: float = 1e5, ridge_eps: float = 1e-4):
+        """
+        Conditionally apply ridge regularization to S if its condition number is too high.
+        """
+        eigvals = jnp.linalg.eigvalsh(S)
+        cond_number = jnp.max(eigvals) / (jnp.min(eigvals) + KalmanFilterConfig.cond_eps)
+
+        def regularize(S_):
+            return S_ + ridge_eps * jnp.eye(S_.shape[0], dtype=S_.dtype)
+
+        return lax.cond(cond_number > threshold, regularize, lambda S_: S, S)
 
     @partial(jax.jit, static_argnames=["self"])
     def _filter_core(self, Y, X0, P0):
@@ -57,6 +75,7 @@ class KalmanFilter:
             y_pred = self.B @ x_pred
             innovation = yt - y_pred
             S = self.B @ P_pred @ self.B.T + R # innovation covariance
+            S = KalmanFilter.regularize_if_ill_conditioned(S)
             K = jnp.linalg.solve(S, (P_pred @ self.B.T).T).T
 
             x_new = x_pred + K @ innovation
@@ -94,6 +113,7 @@ class KalmanFilter:
     def predict_one_step(self, X_t):
         return self.B @ self.A @ X_t
 
+    '''
     @partial(jax.jit, static_argnames=["self"])
     def compute_loss(self, Y_target: jnp.ndarray, X_pca: Optional[jnp.ndarray] = None):
         """
@@ -109,6 +129,7 @@ class KalmanFilter:
 
         loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
         return loss
+    '''
     
     @staticmethod
     @partial(jax.jit, static_argnames=["config"])
@@ -123,6 +144,12 @@ class KalmanFilter:
         Y_true_tplus1 = Y_target[1:]
         
         loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
+        
+        # L2 Regularization: act as soft constraints to enhance Kalman filter stability
+        loss += config.lambda_A * jnp.sum(params["A"]**2)
+        loss += config.lambda_G * jnp.sum(params["G"]**2)
+        loss += config.lambda_H * jnp.sum(params["H"]**2)
+
         return loss
     
     

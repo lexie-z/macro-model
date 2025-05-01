@@ -7,16 +7,10 @@ from statsmodels.tsa.api import VAR
 jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
 
 def spectral_radius_projection(A: jnp.ndarray, target_radius: float = 0.98) -> jnp.ndarray:
-    """
-    Remove logging to eliminate potential side effects with JIT compilation
-    """
-    eigs = eigvals(A)
+    eigs = jnp.linalg.eigvals(A)
     current_radius = jnp.max(jnp.abs(eigs))
-    return jnp.where(
-        current_radius >= 1,
-        (target_radius / current_radius) * A,
-        A
-    )
+    scale = jnp.minimum(1.0, target_radius / current_radius)
+    return A * scale
 
 def regularize_covariance_ridge(M: jnp.ndarray, epsilon=1e-2):
     logger.info(f"Applying ridge regularization to covariance matrix with ε = {epsilon}.")

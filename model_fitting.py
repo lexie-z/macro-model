@@ -4,19 +4,19 @@ from scipy.linalg import cholesky, LinAlgError
 from config import logger
 import pandas as pd
 from statsmodels.tsa.api import VAR
-
 jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
 
-def spectral_radius_projection(A: jnp.ndarray, target_radius: float = 0.98):
+def spectral_radius_projection(A: jnp.ndarray, target_radius: float = 0.98) -> jnp.ndarray:
+    """
+    Remove logging to eliminate potential side effects with JIT compilation
+    """
     eigs = eigvals(A)
     current_radius = jnp.max(jnp.abs(eigs))
-    if current_radius >= 1:
-        A = (target_radius / current_radius) * A
-        logger.warning(f"Projected A to spectral radius {target_radius:.2f} to ensure stability.")
-    else:
-        logger.info("Matrix A is already stable (spectral radius < 1).")
-
-    return A
+    return jnp.where(
+        current_radius >= 1,
+        (target_radius / current_radius) * A,
+        A
+    )
 
 def regularize_covariance_ridge(M: jnp.ndarray, epsilon=1e-2):
     logger.info(f"Applying ridge regularization to covariance matrix with ε = {epsilon}.")

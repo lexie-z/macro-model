@@ -4,10 +4,10 @@ import logging
 from functools import partial
 from dataclasses import dataclass
 from typing import Optional, Any
-
+jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
 logger = logging.getLogger(__name__)
 
-@dataclass
+@dataclass(frozen=True)
 class KalmanFilterConfig:
     certainty_factor: float = 1.0  
     use_pca_init: bool = False     
@@ -38,7 +38,7 @@ class KalmanFilter:
         self.S_list: Optional[Any] = None
         self.log_likelihood: Optional[float] = None
 
-    @partial(jax.jit, static_argnums=0)
+    @partial(jax.jit, static_argnames=["self"])
     def _filter_core(self, Y, X0, P0):
         """
         Construct standard kalman filter
@@ -90,12 +90,15 @@ class KalmanFilter:
         self.X_filt, self.P_all, self.innovations, self.S_list = self._filter_core(Y, X0, P0)
         return
 
-    @partial(jax.jit, static_argnums=0)
+    @partial(jax.jit, static_argnames=["self"])
     def predict_one_step(self, X_t):
         return self.B @ self.A @ X_t
 
-    @partial(jax.jit, static_argnums=0)
+    @partial(jax.jit, static_argnames=["self"])
     def compute_loss(self, Y_target: jnp.ndarray, X_pca: Optional[jnp.ndarray] = None):
+        """
+        Instance loss — for inspection/debugging only. Do not use with jax.grad - non differentiable.
+        """
         # Run filter if needed
         if self.X_filt is None:
             self.run_filter(Y_target, X_pca)
@@ -106,3 +109,20 @@ class KalmanFilter:
 
         loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
         return loss
+    
+    @staticmethod
+    @partial(jax.jit, static_argnames=["config"])
+    def compute_loss_static(params, Y_target, X_pca=None, config=None):
+        """Differentiable loss function."""
+        kf = KalmanFilter(
+            A=params["A"], B=params["B"], G=params["G"], H=params["H"], config=config
+        )
+        kf.run_filter(Y_target, X_pca)
+        # One-step ahead prediction
+        Y_pred_tplus1 = (kf.B @ (kf.A @ kf.X_filt[:-1].T)).T
+        Y_true_tplus1 = Y_target[1:]
+        
+        loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
+        return loss
+    
+    

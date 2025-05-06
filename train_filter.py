@@ -7,7 +7,6 @@ import matplotlib.pyplot as plt
 from typing import Dict, Optional, List, Tuple
 from core_filter import KalmanFilter, KalmanFilterConfig
 from model_fitting import spectral_radius_projection
-
 logger = logging.getLogger(__name__)
 
 class KalmanTrainer:
@@ -18,6 +17,7 @@ class KalmanTrainer:
         optimizer: optax.GradientTransformation,
         X_pca: Optional[jnp.ndarray] = None,
         config: Optional[KalmanFilterConfig] = None,
+        config_callback = None,
         project_spectral: bool = True,
         log_interval: int = 30
     ):
@@ -28,6 +28,7 @@ class KalmanTrainer:
         self.X_pca = X_pca
         self.params = params_init
         self.config = config or KalmanFilterConfig()
+        self.config_callback = config_callback
         self.optimizer = optimizer
         self.opt_state = optimizer.init(self.params)
         self.project_spectral = project_spectral
@@ -40,7 +41,7 @@ class KalmanTrainer:
         self.loss_grad_fn = jax.jit(jax.value_and_grad(KalmanTrainer._loss_wrapper),static_argnames=["config"])
 
     @staticmethod
-    def _loss_wrapper(params, Y, X_pca, config):
+    def _loss_wrapper(params, Y, X_pca,config):
         return KalmanFilter.compute_loss_static(params, Y, X_pca, config)
 
     def _step(self, params: Dict[str, jnp.ndarray], opt_state: optax.OptState) -> Tuple[Dict[str, jnp.ndarray], optax.OptState, float, Dict[str, jnp.ndarray]]:
@@ -49,14 +50,17 @@ class KalmanTrainer:
         args: params : dict(A,B,G,H)
         opt_state: internal state of the optimizer
         """
+        # Compute loss and gradient
         loss, grads = self.loss_grad_fn(params, self.Y, self.X_pca, self.config)
 
         if not jnp.isfinite(loss):
             raise FloatingPointError("Non-finite loss encountered.")
 
+        # Update: params <- params - delta * gradient
         updates, opt_state = self.optimizer.update(grads, opt_state, params)
         params = optax.apply_updates(params, updates)
 
+        # Project radius of A to lie within unit circle
         if self.project_spectral:
             params = params.copy()
             params["A"] = spectral_radius_projection(params["A"])
@@ -71,16 +75,24 @@ class KalmanTrainer:
         opt_state = self.opt_state
 
         for step in range(num_steps):
+            
+            # Replace config when callback config is not None (i.e. penalty weight scheduling & curriculum training)
+            if self.config_callback is not None:
+                self.config = self.config_callback(step, self.config)
+                
+            # Early stop if loss contains NaN or Inf
             try:
                 params, opt_state, loss, grads = self._step(params, opt_state)
             except FloatingPointError as e:
                 logger.warning(f"Step {step:03d} failed: {e}. Stopping early.")
                 break
-
+            
+            # Record loss, parameter, and gradient norm history for model diagnosis
             self.loss_history.append(loss)
             self.param_history.append({k: v.copy() for k, v in params.items()})
             self.grad_history.append({k: v.copy() for k, v in grads.items()})
             
+            # Log loss every once in a while
             if step % self.log_interval == 0:
                 logger.info(f"[Step {step:03d}] Loss: {loss:.6f}")
 
@@ -94,54 +106,56 @@ class KalmanTrainer:
     
     def main_diagnostics(self):
         """
-        Plot training diagnostics using stored param and grad histories.
+        Plot training diagnostics.
         """
 
         steps = range(len(self.loss_history))
 
+        fig, axs = plt.subplots(2, 2, figsize=(12,6))
+
         # --- Plot 1: Loss Curve ---
-        plt.figure(figsize=(10, 6))
-        plt.subplot(2, 2, 1)
-        plt.plot(self.loss_history)
-        plt.title("Loss Over Steps")
-        plt.xlabel("Step")
-        plt.ylabel("Loss")
-        plt.grid(True)
+        axs[0, 0].plot(self.loss_history)
+        axs[0, 0].set_title("Loss Over Steps")
+        axs[0, 0].set_xlabel("Step")
+        axs[0, 0].set_ylabel("Loss")
+        axs[0, 0].grid(True)
 
         # --- Plot 2: Spectral Radius of A ---
         spectral_radii = [
             np.max(np.abs(np.linalg.eigvals(np.array(p["A"]))))
             for p in self.param_history
         ]
-        plt.subplot(2, 2, 2)
-        plt.plot(steps, spectral_radii)
-        plt.axhline(0.98, color='red', linestyle='--', label="Unit circle")
-        plt.title("Spectral Radius of A")
-        plt.xlabel("Step")
-        plt.ylabel("ρ(A)")
-        plt.grid(True)
-        plt.legend()
+        axs[0, 1].plot(steps, spectral_radii)
+        axs[0, 1].axhline(0.98, color='red', linestyle='--', label="Unit circle")
+        axs[0, 1].set_title("Spectral Radius of A")
+        axs[0, 1].set_xlabel("Step")
+        axs[0, 1].set_ylabel("ρ(A)")
+        axs[0, 1].legend()
+        axs[0, 1].grid(True)
 
-        # --- Plot 3: Gradient Norm of A ---
-        grad_norms = [
-            np.linalg.norm(np.array(g["A"]))
-            for g in self.grad_history
-        ]
-        plt.subplot(2, 2, 3)
-        plt.plot(steps, grad_norms)
-        plt.title("Gradient Norm of A")
-        plt.xlabel("Step")
-        plt.ylabel("||∇A||")
-        plt.grid(True)
+        # --- Plot 3: Gradient Norms ---
+        grad_norm_A = [np.linalg.norm(np.array(g["A"])) for g in self.grad_history]
+        grad_norm_B = [np.linalg.norm(np.array(g["B"])) for g in self.grad_history]
+        grad_norm_G = [np.linalg.norm(np.array(g["G"])) for g in self.grad_history]
+        grad_norm_H = [np.linalg.norm(np.array(g["H"])) for g in self.grad_history]
 
-        # --- Plot 4: Loss Delta (Log scale) ---
+        axs[1, 0].plot(steps, grad_norm_A, label="||∇A||")
+        axs[1, 0].plot(steps, grad_norm_B, label="||∇B||")
+        axs[1, 0].plot(steps, grad_norm_G, label="||∇G||")
+        axs[1, 0].plot(steps, grad_norm_H, label="||∇H||")
+        axs[1, 0].set_title("Gradient Norms")
+        axs[1, 0].set_xlabel("Step")
+        axs[1, 0].set_ylabel("Gradient Norm")
+        axs[1, 0].legend()
+        axs[1, 0].grid(True)
+
+        # --- Plot 4: Log Loss Delta ---
         loss_deltas = np.abs(np.diff(self.loss_history))
-        plt.subplot(2, 2, 4)
-        plt.plot(steps[:-1], np.log1p(loss_deltas))
-        plt.title("Log Loss Delta")
-        plt.xlabel("Step")
-        plt.ylabel("log(ΔLoss + 1)")
-        plt.grid(True)
+        axs[1, 1].plot(steps[:-1], np.log1p(loss_deltas))
+        axs[1, 1].set_title("Log Loss Delta")
+        axs[1, 1].set_xlabel("Step")
+        axs[1, 1].set_ylabel("log(ΔLoss + 1)")
+        axs[1, 1].grid(True)
 
         plt.tight_layout()
         plt.show()

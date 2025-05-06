@@ -5,6 +5,10 @@ plt.rcParams['figure.figsize'] = (6, 3)
 np.set_printoptions(precision=4, suppress=True, linewidth=120)
 from sklearn.metrics import mean_squared_error, r2_score
 from diagnostics import residual_plot, compute_cross_covariance, compute_residual_mean, compute_residuals_correlation
+from core_filter import KalmanFilterConfig
+
+config = KalmanFilterConfig()
+gamma = config.gamma
 
 def plot_state_consistency(X_filt: np.ndarray, X_pca: np.ndarray, P_all=None):
     """
@@ -49,28 +53,45 @@ def plot_state_consistency(X_filt: np.ndarray, X_pca: np.ndarray, P_all=None):
         plt.show()
     return
 
-def evaluate_observation_fit(Y_target: np.ndarray, X_input: np.ndarray, B: np.ndarray, label: str = "t+1 prediction"):
+def evaluate_multi_step_observation_fit(Y_target: np.ndarray, X_filt: np.ndarray, A: np.ndarray, B: np.ndarray, max_horizon: int):
     """
-    Evaluate observation Y_hat = B @ X for either t+1 prediction or filtered fit.
+    Evaluate multi-step-ahead predictions with decay-weighted RMSE.
     """
-    logger.info(f"Evaluating {label} accuracy...")
+    logger.info(f"Evaluating multi-step forecast (up to t+{max_horizon}) with decay factor γ={gamma}")
+    total_weighted_rmse = 0.0
+    n_targets = Y_target.shape[1]
 
-    Y_pred = X_input @ B.T
+    for n in range(1, max_horizon + 1):
+        A_h = np.linalg.matrix_power(A, n)
+        X_t = X_filt[:-n]
+        Y_pred = (B @ (A_h @ X_t.T)).T
+        Y_true = Y_target[n:]
 
-    for i in range(Y_target.shape[1]):
-        rmse = np.sqrt(mean_squared_error(Y_target[:, i], Y_pred[:, i]))
-        r2 = r2_score(Y_target[:, i], Y_pred[:, i])
-        logger.info(f"Y[{i}] ({label}) — RMSE: {rmse:.4f}, R^2: {r2:.4f}")
+        decay_weight = gamma ** (n - 1)
 
-        plt.figure(figsize=(6, 3))
-        plt.plot(Y_target[:, i], label='True Y', linewidth=2)
-        plt.plot(Y_pred[:, i], label=f'Predicted Y ({label})', linestyle='--')
-        plt.title(f'{label} — Y[{i}]')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
-        plt.show()
-    return
+        rmse_per_var = [
+            np.sqrt(mean_squared_error(Y_true[:, i], Y_pred[:, i]))
+            for i in range(n_targets)
+        ]
+        weighted_rmse = decay_weight * np.mean(rmse_per_var)
+        total_weighted_rmse += weighted_rmse
+
+        logger.info(f"[t+{n}] Weighted RMSE: {weighted_rmse:.4f} (weight={decay_weight:.3f})")
+        for i, rmse in enumerate(rmse_per_var):
+            r2 = r2_score(Y_true[:, i], Y_pred[:, i])
+            logger.info(f"Y[{i}] — t+{n} RMSE: {rmse:.4f}, R²: {r2:.4f}")
+
+            plt.figure(figsize=(6, 3))
+            plt.plot(Y_true[:, i], label='True Y', linewidth=2)
+            plt.plot(Y_pred[:, i], label=f'Predicted Y (t+{n})', linestyle='--')
+            plt.title(f'Multi-step Prediction — Y[{i}], t+{n}')
+            plt.legend()
+            plt.grid(True)
+            plt.tight_layout()
+            plt.show()
+
+    logger.info(f"Total decay-weighted RMSE (up to {max_horizon}): {total_weighted_rmse:.4f}")
+    return total_weighted_rmse
 
 
 def compute_loglik_from_kf_terms(innovations: np.ndarray, S_list: np.ndarray):
@@ -104,7 +125,7 @@ def compute_loglik_from_kf_terms(innovations: np.ndarray, S_list: np.ndarray):
     logger.info(f"Final computed log-likelihood: {logL:.4f}")
     return logL
 
-def evaluate_kalman_pipeline(Y, X_filt, X_pca, B, A, innovations, S_list, P_all):
+def evaluate_kalman_pipeline(Y, X_filt, X_pca, B, A, innovations, S_list, P_all, max_horizon):
     """
     Evaluate Kalman Filter performance:
     1. State estimate consistency
@@ -126,18 +147,13 @@ def evaluate_kalman_pipeline(Y, X_filt, X_pca, B, A, innovations, S_list, P_all)
     compute_residuals_correlation(innovations, name="Innovation")
     residual_plot(innovations, name="Innovation")
     compute_residual_mean(innovations, name="Innovation")
-
-    # Step 3: filtered reconstruction evaluation
-    logger.info("Step 3: Evaluating observation reconstruction accuracy...")
-    evaluate_observation_fit(Y, X_filt, B, label="filtered")
     
-    # Step 4: t+1 prediction evaluation
-    logger.info("Step 4: Evaluating one-step-ahead prediction...")
-    X_pred_tplus1 = (A @ X_filt[:-1].T).T   # (T-1, k)
-    evaluate_observation_fit(Y[1:], X_pred_tplus1, B, label="t+1 prediction")
+    # 3. Prediction evaluation
+    logger.info("Step 3: Evaluating multi-step forecast (with decay)...")
+    evaluate_multi_step_observation_fit(Y, X_filt, A, B, max_horizon=max_horizon)
 
-    # 5. Log-likelihood evaluation
-    logger.info("Step 5: Computing log-likelihood...")
+    # 4. Log-likelihood evaluation
+    logger.info("Step 4: Computing log-likelihood...")
     logL = compute_loglik_from_kf_terms(innovations, S_list)
 
 

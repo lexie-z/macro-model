@@ -8,15 +8,19 @@ import jax.lax as lax
 jnp.set_printoptions(precision=4, suppress=True, linewidth=120)
 logger = logging.getLogger(__name__)
 
-@dataclass(frozen=True)
+# set to static for JIT compatibility
+# when flexibility is required, create another callback config
+@dataclass(frozen=True) 
 class KalmanFilterConfig:
-    certainty_factor: float = 1.0  
+    certainty_factor: float = 1.0  # initial P = certainty_factor * I
     use_pca_init: bool = False     
-    log_first_steps: int = 5       # how many first steps to log Kalman gain
-    lambda_A: float = 1e-2
-    lambda_G: float = 1e-3
-    lambda_H: float = 1e-3
+    log_first_steps: int = 5  # how many first steps to log Kalman gain
+    lambda_A: float = 0   # L2 penalty over ||A||
+    lambda_G: float = 0   # L2 penalty over ||G||
+    lambda_H: float = 0   # L2 penalty over ||H||
     cond_eps: float = 1e-12
+    gamma: float = 0.7  # Decay factor for multi-step prediction
+    max_horizon: int = 1  # default to short horizon
     
 class KalmanFilter:
     def __init__(self, A: jnp.ndarray, B: jnp.ndarray, G: jnp.ndarray, H: jnp.ndarray, config: Optional[KalmanFilterConfig] = None):
@@ -108,48 +112,39 @@ class KalmanFilter:
 
         self.X_filt, self.P_all, self.innovations, self.S_list = self._filter_core(Y, X0, P0)
         return
-
-    @partial(jax.jit, static_argnames=["self"])
-    def predict_one_step(self, X_t):
-        return self.B @ self.A @ X_t
-
-    '''
-    @partial(jax.jit, static_argnames=["self"])
-    def compute_loss(self, Y_target: jnp.ndarray, X_pca: Optional[jnp.ndarray] = None):
-        """
-        Instance loss — for inspection/debugging only. Do not use with jax.grad - non differentiable.
-        """
-        # Run filter if needed
-        if self.X_filt is None:
-            self.run_filter(Y_target, X_pca)
-
-        # One-step ahead prediction
-        Y_pred_tplus1 = (self.B @ (self.A @ self.X_filt[:-1].T)).T
-        Y_true_tplus1 = Y_target[1:]
-
-        loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
-        return loss
-    '''
     
     @staticmethod
     @partial(jax.jit, static_argnames=["config"])
     def compute_loss_static(params, Y_target, X_pca=None, config=None):
-        """Differentiable loss function."""
+        """
+        Differentiable loss with multi-step in-sample forecast.
+        Supports up to 4-step ahead prediction with decaying weight.
+        """
         kf = KalmanFilter(
             A=params["A"], B=params["B"], G=params["G"], H=params["H"], config=config
         )
         kf.run_filter(Y_target, X_pca)
-        # One-step ahead prediction
-        Y_pred_tplus1 = (kf.B @ (kf.A @ kf.X_filt[:-1].T)).T
-        Y_true_tplus1 = Y_target[1:]
-        
-        loss = jnp.mean(jnp.square(Y_pred_tplus1 - Y_true_tplus1))
-        
-        # L2 Regularization: act as soft constraints to enhance Kalman filter stability
+
+        X_filt = kf.X_filt
+        B, A = kf.B, kf.A
+        loss = 0.0
+
+        for n in range(1, config.max_horizon + 1):
+            # Predict Y_{t+n} = B @ A^n @ X_t 
+            A_n = jnp.linalg.matrix_power(A, n)
+            X_t = X_filt[:-n]  # (T - h, k)
+            Y_pred = (B @ (A_n @ X_t.T)).T  # (T - h, n)
+            Y_true = Y_target[n:]
+
+        decay_weight = config.gamma ** (n - 1)
+        loss += decay_weight * jnp.mean(jnp.square(Y_pred - Y_true))
+
+        # L2 Regularization for stability
         loss += config.lambda_A * jnp.sum(params["A"]**2)
         loss += config.lambda_G * jnp.sum(params["G"]**2)
         loss += config.lambda_H * jnp.sum(params["H"]**2)
 
         return loss
+
     
     

@@ -28,3 +28,6 @@ venv/
 *.ckpt
 *.pth
 *.pt
+
+# Plots
+*.png
